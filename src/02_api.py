@@ -100,7 +100,6 @@ def create_pagination_links(request: Request, total_count: int, limit: int, offs
     if offset + limit < total_count:
         query_params['offset'] = offset + limit
         query_params['limit'] = limit
-        # Reconstruct query string
         qs = "&".join(f"{k}={v}" for k, v in query_params.items())
         links.append(CollectionLink(href=f"{base_url}?{qs}", rel="next", title="Next page"))
 
@@ -171,6 +170,10 @@ def get_municipality_items(
     count_query = "SELECT count(*) FROM overture_buildings WHERE municipality_name = ?;"
     total_count = run_db_query(count_query, (municipality,))[0][0]
 
+    # 404 if the municipality exists but has zero buildings, or doesn't exist.
+    if total_count == 0:
+        raise HTTPException(status_code=404, detail=f"Collection '{municipality}' not found or contains no features.")
+
     # 2. Fetch Data and Geometry
     data_query = """
         SELECT
@@ -216,6 +219,7 @@ def get_specific_building(municipality: str, building_id: str):
     data_cols = ['id', 'municipality_name', 'geometry_geojson']
     results = run_db_query(data_query, (building_id, municipality))
 
+    # 404 if not found
     if not results:
         raise HTTPException(404, detail="Building not found.")
 
@@ -234,38 +238,51 @@ def query_by_bbox(
 ):
     """Return all buildings within the given bounding box (EPSG:28992)."""
 
-    bbox_polygon_wkt = (
-        f"POLYGON(({minx} {miny}, {maxx} {miny}, {maxx} {maxy}, {minx} {maxy}, {minx} {miny}))"
-    )
+    try:
+        if minx >= maxx or miny >= maxy:
+            # 400 Bad Request for invalid user inputs
+            raise HTTPException(status_code=400,
+                                detail="Invalid BBOX coordinates: min values must be less than max values.")
 
-    bbox_filter = f"ST_Intersects(geometry, ST_GeomFromText('{bbox_polygon_wkt}'))"
+        bbox_polygon_wkt = (
+            f"POLYGON(({minx} {miny}, {maxx} {miny}, {maxx} {maxy}, {minx} {maxy}, {minx} {miny}))"
+        )
 
-    count_query = f"SELECT count(*) FROM overture_buildings WHERE {bbox_filter};"
-    total_count = run_db_query(count_query)[0][0]
+        bbox_filter = f"ST_Intersects(geometry, ST_GeomFromText('{bbox_polygon_wkt}'))"
+        count_query = f"SELECT count(*) FROM overture_buildings WHERE {bbox_filter};"
+        total_count = run_db_query(count_query)[0][0]
 
+        # 404 Not Found if the BBOX yields zero results
+        if total_count == 0:
+            raise HTTPException(status_code=404, detail="No buildings found within the specified bounding box.")
 
-    data_query = f"""
-        SELECT
-            id,
-            municipality_name,
-            ST_AsGeoJSON(geometry) AS geometry_geojson
-        FROM overture_buildings
-        WHERE {bbox_filter}
-        LIMIT ? OFFSET ?;
-    """
+        data_query = f"""
+            SELECT
+                id,
+                municipality_name,
+                ST_AsGeoJSON(geometry) AS geometry_geojson
+            FROM overture_buildings
+            WHERE {bbox_filter}
+            LIMIT ? OFFSET ?;
+        """
 
-    data_cols = ['id', 'municipality_name', 'geometry_geojson']
-    results = run_db_query(data_query, (limit, offset))
+        data_cols = ['id', 'municipality_name', 'geometry_geojson']
+        results = run_db_query(data_query, (limit, offset))
 
-    features = [create_geojson_feature_from_row(row, data_cols) for row in results]
-    links = create_pagination_links(request, total_count, limit, offset)
+        features = [create_geojson_feature_from_row(row, data_cols) for row in results]
+        links = create_pagination_links(request, total_count, limit, offset)
 
-    return GeoJSONFeatureCollection(
-        type="FeatureCollection",
-        numberMatched=total_count,
-        numberReturned=len(features),
-        limit=limit,
-        offset=offset,
-        links=links,
-        features=features
-    )
+        return GeoJSONFeatureCollection(
+            type="FeatureCollection",
+            numberMatched=total_count,
+            numberReturned=len(features),
+            limit=limit,
+            offset=offset,
+            links=links,
+            features=features
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        # 500 Internal Server Error for any unexpected errors in the query
+        raise HTTPException(status_code=500, detail=f"Unexpected spatial query error: {str(e)}")

@@ -159,4 +159,4 @@ if __name__ == "__main__":
 
     join_municipalities(DB_FILE, MUNI_FILE)
 
-    print_db(DB_FILE)
+    # print_db(DB_FILE)
