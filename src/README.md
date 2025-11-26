@@ -6,7 +6,6 @@ Course: Geo5019 Geostudio
 
 This repo implements [assignment 1](https://geo5019.notion.site/Assignment-01-Building-Footprints-RESTful-API-28ebfa16e8658012b584d60b11cc706c).
 It includes two files, one for setting up the database and one for the API.
-The database setup file is `setup_database.py` and the API file is `app.py`.
 It also includes a report `report.pdf`that details some of the design and engineering decisions made.
 
 == How to use
@@ -23,8 +22,8 @@ Then, run the database setup script from the src directory to create and populat
 python 01_backend_setup.py
 ```
 
-Then, start the API server by running:
+Then, start the API on localhost by running:
 ```bash
 uvicorn 02_api:app --reload
 ```
-Everything should now be set up and running. 
+Everything should now be set up :)
