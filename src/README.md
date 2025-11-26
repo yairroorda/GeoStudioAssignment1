@@ -11,15 +11,20 @@ It also includes a report `report.pdf`that details some of the design and engine
 
 == How to use
 
-To run the code, first install the required packages:
+To run the code, first setup a venv and install the required packages:
 ```bash
-pip install -r requirements.txt
+python -m venv venv
+venv\Scripts\activate  # On Windows
+pip install -r src\requirements.txt
 ```
 
-Then, run the database setup script to create and populate the database:
+Then, run the database setup script from the src directory to create and populate the database:
+```bash
+python 01_backend_setup.py
+```
 
 Then, start the API server by running:
 ```bash
-unicorn 02_api:app --reload
+uvicorn 02_api:app --reload
 ```
 Everything should now be set up and running. 
