@@ -1,10 +1,12 @@
 import duckdb
 import pandas as pd
+import requests
+import json
 from pyproj import Transformer
 
 # DB setup
 DB_FILE = 'buildings_database.db'
-LIMIT = 100
+MUNI_FILE = 'municipalities_zh.geojson'
 
 # Bounding Box in RD New:
 minx = 78600.0
@@ -16,7 +18,7 @@ bbox_28992 = (minx, miny, maxx, maxy)
 def transform_to_wgs84(input_bbox, input_crs="EPSG:28992"):
     print(f"Original Bounding Box (EPSG:28992): {bbox_28992}")
 
-    transformer = Transformer.from_crs("EPSG:28992", "EPSG:4326", always_xy=True)
+    transformer = Transformer.from_crs(input_crs, "EPSG:4326", always_xy=True)
     xmin_rd, ymin_rd, xmax_rd, ymax_rd = input_bbox
 
     lon_min, lat_min = transformer.transform(xmin_rd, ymin_rd)
@@ -25,10 +27,38 @@ def transform_to_wgs84(input_bbox, input_crs="EPSG:28992"):
     return lon_min, lat_min, lon_max, lat_max
 
 
-def download_overture_data(db_file: str, sql_query: str):
+def download_pdok_municipalities(geojson_file):
     """
-    Connects to a DuckDB file, executes the SQL query to download Overture Maps data,
-    and saves it to a table.
+    Downloads Zuid-Holland municipality boundaries from PDOK in EPSG:28992.
+    """
+    print(f"Downloading Zuid-Holland municipalities to {geojson_file}...")
+
+    url = "https://api.pdok.nl/kadaster/bestuurlijkegebieden/ogc/v1_0/collections/gemeentegebied/items"
+
+    params = {
+        "f": "json",
+        "crs": "http://www.opengis.net/def/crs/EPSG/0/28992",
+        "ligt_in_provincie_naam": "Zuid-Holland",
+        "limit": 1000
+    }
+
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+
+        with open(geojson_file, 'w', encoding='utf-8') as f:
+            json.dump(response.json(), f)
+
+        print("Download successful.")
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error downloading from PDOK: {e}")
+        raise
+
+
+def download_overture_data(db_file):
+    """
+    Connects to a DuckDB file, executes the SQL query to download Overture Maps data.
     """
     print(f"Connecting to or creating database file: **{db_file}**")
 
@@ -37,29 +67,83 @@ def download_overture_data(db_file: str, sql_query: str):
     with duckdb.connect(database=db_file) as conn:
         print("Executing SQL query to download and import data...")
 
-        # Execute the entire multi-statement SQL query
+        sql_query = f"""
+        INSTALL spatial;
+        LOAD spatial;
+        INSTALL httpfs;
+        LOAD httpfs;
+
+        -- Overture Maps data is hosted in us-west-2
+        SET s3_region='us-west-2';
+
+            CREATE OR REPLACE TABLE overture_buildings AS
+            SELECT
+                id,
+                bbox,
+                ST_Transform(ST_FLIPCOORDINATES(geometry), 'EPSG:4326', 'EPSG:28992') AS geometry
+            FROM
+                read_parquet('s3://overturemaps-us-west-2/release/2025-10-22.0/theme=buildings/type=building/*.parquet')
+            WHERE
+                bbox.xmin BETWEEN {XMIN} AND {XMAX}
+                AND bbox.ymin BETWEEN {YMIN} AND {YMAX}
+        """
         conn.execute(sql_query)
 
-        results = conn.execute("SELECT count(*) FROM delft_buildings;").fetchone()
+        results = conn.execute("SELECT count(*) FROM overture_buildings;").fetchone()
 
         if results:
-            print(f"Imported **{results[0]}** buildings for Delft.")
+            print(f"Imported **{results[0]}** buildings.")
         else:
             print("Some error occurred during data import.")
 
 
-def print_db():
+def print_db(db_file):
     # Connect to the persistent database file
-    with duckdb.connect(database=DB_FILE) as conn:
+    with duckdb.connect(database=db_file) as conn:
         # display columns names
-        columns = conn.execute("PRAGMA table_info('delft_buildings');").fetchall()
+        columns = conn.execute("PRAGMA table_info('overture_buildings');").fetchall()
         column_names = [col[1] for col in columns]
-        print("Column names in 'delft_buildings' table:", column_names)
+        print("Column names in 'overture_buildings' table:", column_names)
 
         # Run a SELECT query and fetch the result directly into a Pandas DataFrame
-        data_df = conn.sql("SELECT id, height, geometry FROM delft_buildings LIMIT 20;").df()
+        data_df = conn.sql("SELECT * FROM overture_buildings LIMIT 20;").df()
 
         print(data_df)
+
+
+def join_municipalities(db_file, geojson_path):
+    """
+    Loads the local GeoJSON of municipalities and spatially joins it with buildings.
+    """
+    print("Performing spatial join with municipalities...")
+
+    sql_query = f"""
+    INSTALL spatial;
+    LOAD spatial;
+
+    CREATE OR REPLACE TABLE municipalities AS 
+    SELECT * FROM ST_Read('{geojson_path}');
+
+    ALTER TABLE overture_buildings ADD COLUMN IF NOT EXISTS municipality_name VARCHAR;
+
+    UPDATE overture_buildings
+    SET municipality_name = m.naam
+    FROM municipalities m
+    WHERE ST_Intersects(overture_buildings.geometry, m.geom); 
+    """
+
+
+    with duckdb.connect(database=db_file) as conn:
+        conn.execute(sql_query)
+
+        # Verification
+        result = conn.execute("""
+        SELECT municipality_name, count(*)
+        FROM overture_buildings
+        GROUP BY municipality_name
+        """).df()
+        print("Buildings per Municipality:")
+        print(result)
 
 if __name__ == "__main__":
     # Set pandas to display full rows and columns
@@ -69,30 +153,10 @@ if __name__ == "__main__":
     XMIN, YMIN, XMAX, YMAX = transform_to_wgs84(bbox_28992)
     print(f"Transformed Bounding Box (EPSG:4326): {XMIN, YMIN, XMAX, YMAX}")
 
-    SQL_QUERY = f"""
-    INSTALL spatial;
-    LOAD spatial;
-    INSTALL httpfs;
-    LOAD httpfs;
+    download_overture_data(DB_FILE)
 
-    -- Overture Maps data is hosted in us-west-2
-    SET s3_region='us-west-2';
+    download_pdok_municipalities(MUNI_FILE)
 
-    CREATE OR REPLACE TABLE delft_buildings AS
-    SELECT
-      *
-    FROM
-      read_parquet('az://overturemapswestus2.blob.core.windows.net/release/2025-10-22.0/theme=buildings/type=building/*', filename=true, hive_partitioning=1)
-    WHERE
-      names.primary IS NOT NULL
-      AND bbox.xmin BETWEEN {XMIN} AND {XMAX}
-      AND bbox.ymin BETWEEN {YMIN} AND {YMAX}
-    LIMIT {LIMIT};
-    """
+    join_municipalities(DB_FILE, MUNI_FILE)
 
-    try:
-        download_overture_data(DB_FILE, SQL_QUERY)
-    except Exception as e:
-        print(f"An error occurred during the operation: {e}")
-
-    print_db()
+    print_db(DB_FILE)
